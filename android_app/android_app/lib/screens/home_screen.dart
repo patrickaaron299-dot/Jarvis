@@ -1,269 +1,266 @@
 import 'package:flutter/material.dart';
 import '../config/app_config.dart';
 import '../services/api_service.dart';
-import '../services/auth_storage.dart';
-import '../services/voice_service.dart';
 import '../widgets/jarvis_orb.dart';
-import 'login_screen.dart';
-import 'memory_screen.dart';
-import 'tools_screen.dart';
 
-class _ChatMessage {
-  final String role;
-  final String content;
-  final List<String> toolsUsed;
-
-  _ChatMessage({
-    required this.role,
-    required this.content,
-    this.toolsUsed = const [],
-  });
-}
-
-class HomeScreen extends StatefulWidget {
+class ToolsScreen extends StatefulWidget {
   final ApiService api;
-  final AuthStorage storage;
-  final VoiceService voice;
 
-  const HomeScreen({
-    super.key,
-    required this.api,
-    required this.storage,
-    required this.voice,
-  });
+  const ToolsScreen({super.key, required this.api});
 
   @override
-  State<HomeScreen> createState() => _HomeScreenState();
+  State<ToolsScreen> createState() => _ToolsScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
-  final _inputController = TextEditingController();
-  final _scrollController = ScrollController();
-
-  final List<_ChatMessage> _messages = [];
-  int? _conversationId;
-  bool _serverOnline = false;
-  bool _autoSpeak = true;
-  bool _isThinking = false;
-  bool _isListening = false;
-  bool _isSpeaking = false;
+class _ToolsScreenState extends State<ToolsScreen> {
+  List<Map<String, dynamic>> _tools = [];
+  List<Map<String, dynamic>> _logs = [];
+  bool _loading = true;
+  String? _error;
 
   @override
   void initState() {
     super.initState();
-    _initScreen();
+    _loadData();
   }
 
-  Future<void> _initScreen() async {
-    _autoSpeak = await widget.storage.getAutoSpeak();
-    await widget.voice.initTts(
-      onSpeakStart: () {
-        if (mounted) setState(() => _isSpeaking = true);
-      },
-      onSpeakDone: () {
-        if (mounted) setState(() => _isSpeaking = false);
-      },
-    );
-    await _checkServerHealth();
-  }
-
-  Future<void> _checkServerHealth() async {
+  Future<void> _loadData() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
     try {
-      final url = await widget.storage.getServerUrl();
-      await widget.api.checkHealth(url);
-      if (mounted) setState(() => _serverOnline = true);
-    } catch (_) {
-      if (mounted) setState(() => _serverOnline = false);
+      final results = await Future.wait([
+        widget.api.getTools(),
+        widget.api.getToolLogs(),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _tools = results[0];
+        _logs = results[1];
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString();
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _toggleTool(int index, bool nextValue) async {
+    final tool = _tools[index];
+    final name = tool['name'].toString();
+    final previous = tool['is_allowed'] == true;
+
+    setState(() {
+      _tools[index] = {...tool, 'is_allowed': nextValue};
+    });
+
+    try {
+      await widget.api.setToolPermission(name, nextValue);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _tools[index] = {...tool, 'is_allowed': previous};
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString())),
+      );
     }
   }
 
   @override
-  void dispose() {
-    _inputController.dispose();
-    _scrollController.dispose();
-    widget.voice.dispose();
-    super.dispose();
-  }
-
-  JarvisOrbState get _orbState {
-    if (_isListening) return JarvisOrbState.listening;
-    if (_isThinking) return JarvisOrbState.thinking;
-    if (_isSpeaking) return JarvisOrbState.speaking;
-    return JarvisOrbState.idle;
-  }
-
-  void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 250),
-          curve: Curves.easeOut,
-        );
-      }
-    });
-  }
-
-  Future<void> _handleAuthExpired() async {
-    await widget.storage.clearSession();
-    if (!mounted) return;
-    Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute(
-        builder: (_) => LoginScreen(
-          api: widget.api,
-          storage: widget.storage,
-          voice: widget.voice,
+  Widget build(BuildContext context) {
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        backgroundColor: AppConfig.bgDark,
+        appBar: AppBar(
+          backgroundColor: AppConfig.surfaceDark,
+          foregroundColor: AppConfig.textPrimary,
+          title: const Text(
+            'AUTHORISED TOOLS',
+            style: TextStyle(fontSize: 15, letterSpacing: 1.8),
+          ),
+          bottom: const TabBar(
+            indicatorColor: AppConfig.cyanPrimary,
+            labelColor: AppConfig.cyanPrimary,
+            unselectedLabelColor: AppConfig.textMuted,
+            tabs: [
+              Tab(text: 'PERMISSIONS'),
+              Tab(text: 'AUDIT LOG'),
+            ],
+          ),
         ),
-      ),
-      (_) => false,
-    );
-  }
-
-  Future<void> _sendMessage([String? overrideText]) async {
-    final text = (overrideText ?? _inputController.text).trim();
-    if (text.isEmpty || _isThinking) return;
-
-    _inputController.clear();
-    await widget.voice.stopSpeaking();
-
-    setState(() {
-      _messages.add(_ChatMessage(role: 'user', content: text));
-      _isThinking = true;
-    });
-    _scrollToBottom();
-
-    try {
-      final res = await widget.api.sendChat(
-        message: text,
-        conversationId: _conversationId,
-      );
-      _conversationId = res['conversation_id'] as int?;
-      final reply = (res['reply'] ?? '').toString();
-      final rawTools = (res['tools_used'] as List<dynamic>? ?? []);
-      final toolsUsed = rawTools
-          .map((t) => '${t['tool_name']} (${t['status']})')
-          .toList();
-
-      if (!mounted) return;
-      setState(() {
-        _serverOnline = true;
-        _messages.add(
-          _ChatMessage(role: 'assistant', content: reply, toolsUsed: toolsUsed),
-        );
-        _isThinking = false;
-      });
-      _scrollToBottom();
-
-      if (_autoSpeak && reply.isNotEmpty) {
-        await widget.voice.speak(reply);
-      }
-    } on ApiException catch (e) {
-      if (e.statusCode == 401) {
-        await _handleAuthExpired();
-        return;
-      }
-      if (!mounted) return;
-      setState(() {
-        _isThinking = false;
-        _messages.add(
-          _ChatMessage(role: 'error', content: e.message),
-        );
-      });
-      _scrollToBottom();
-    }
-  }
-
-  Future<void> _toggleVoice() async {
-    if (_isSpeaking) {
-      await widget.voice.stopSpeaking();
-      return;
-    }
-
-    if (_isListening) {
-      await widget.voice.stopListening();
-      setState(() => _isListening = false);
-      return;
-    }
-
-    await widget.voice.startListening(
-      onResult: (words, isFinal) {
-        if (!mounted) return;
-        setState(() {
-          _inputController.text = words;
-          _inputController.selection = TextSelection.fromPosition(
-            TextPosition(offset: words.length),
-          );
-        });
-        if (isFinal && words.trim().isNotEmpty) {
-          _sendMessage(words);
-        }
-      },
-      onListeningChanged: (active) {
-        if (mounted) setState(() => _isListening = active);
-      },
-      onError: (msg) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Voice input: $msg')),
-        );
-      },
-    );
-  }
-
-  Future<void> _openHistorySheet() async {
-    try {
-      final conversations = await widget.api.getConversations();
-      if (!mounted) return;
-      showModalBottomSheet(
-        context: context,
-        backgroundColor: AppConfig.surfaceDark,
-        shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-        ),
-        builder: (ctx) {
-          return SafeArea(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Padding(
-                  padding: EdgeInsets.all(16),
+        body: Stack(
+          children: [
+            Positioned.fill(child: CustomPaint(painter: DotGridPainter())),
+            if (_loading)
+              const Center(
+                child: CircularProgressIndicator(color: AppConfig.cyanPrimary),
+              )
+            else if (_error != null)
+              Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
                   child: Text(
-                    'CONVERSATION HISTORY',
-                    style: TextStyle(
-                      color: AppConfig.cyanPrimary,
-                      letterSpacing: 1.8,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    _error!,
+                    style: const TextStyle(color: AppConfig.statusError),
                   ),
                 ),
-                if (conversations.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.all(24),
-                    child: Text(
-                      'No past conversations yet.',
-                      style: TextStyle(color: AppConfig.textMuted),
-                    ),
-                  )
-                else
-                  Flexible(
-                    child: ListView.builder(
-                      shrinkWrap: true,
-                      itemCount: conversations.length,
-                      itemBuilder: (_, index) {
-                        final conv = conversations[index];
-                        final convId = conv['id'] as int;
-                        return ListTile(
-                          title: Text(
-                            conv['title']?.toString() ?? 'Conversation',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(color: AppConfig.textPrimary),
+              )
+            else
+              TabBarView(
+                children: [
+                  _buildPermissionsTab(),
+                  _buildLogsTab(),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPermissionsTab() {
+    return RefreshIndicator(
+      color: AppConfig.cyanPrimary,
+      onRefresh: _loadData,
+      child: ListView.builder(
+        padding: const EdgeInsets.all(14),
+        itemCount: _tools.length,
+        itemBuilder: (_, index) {
+          final tool = _tools[index];
+          final name = tool['name'].toString();
+          final description = (tool['description'] ?? '').toString();
+          final isAllowed = tool['is_allowed'] == true;
+
+          return Container(
+            margin: const EdgeInsets.only(bottom: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              color: AppConfig.surfaceDark.withAlpha(230),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: isAllowed ? AppConfig.cyanPrimary.withAlpha(110) : AppConfig.borderCyan,
+              ),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        name,
+                        style: const TextStyle(
+                          color: AppConfig.cyanPrimary,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14.5,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        description,
+                        style: const TextStyle(
+                          color: AppConfig.textMuted,
+                          fontSize: 13,
+                          height: 1.35,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Switch(
+                  value: isAllowed,
+                  activeThumbColor: AppConfig.cyanPrimary,
+                  onChanged: (val) => _toggleTool(index, val),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildLogsTab() {
+    return RefreshIndicator(
+      color: AppConfig.cyanPrimary,
+      onRefresh: _loadData,
+      child: _logs.isEmpty
+          ? ListView(
+              padding: const EdgeInsets.all(32),
+              children: const [
+                Center(
+                  child: Text(
+                    'No tool activity recorded yet.',
+                    style: TextStyle(color: AppConfig.textMuted),
+                  ),
+                ),
+              ],
+            )
+          : ListView.builder(
+              padding: const EdgeInsets.all(14),
+              itemCount: _logs.length,
+              itemBuilder: (_, index) {
+                final log = _logs[index];
+                final status = (log['status'] ?? '').toString();
+                final isGood = status == 'executed' || status == 'allowed';
+
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: AppConfig.surfaceDark.withAlpha(230),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: AppConfig.borderCyan),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            (log['tool_name'] ?? '').toString(),
+                            style: const TextStyle(
+                              color: AppConfig.textPrimary,
+                              fontWeight: FontWeight.bold,
+                            ),
                           ),
-                          trailing: IconButton(
-                            icon: const Icon(Icons.delete_outline, color: AppConfig.textMuted),
-                            onPressed: () async {
-                              await widget.api.deleteConversation(convId);
-                              if (_conversationId == convId && mounted) {
-                                setState(() {
-                                  _conversationId = null;
-                                  _
+                          Text(
+                            status.toUpperCase(),
+                            style: TextStyle(
+                              color: isGood ? AppConfig.cyanPrimary : AppConfig.statusError,
+                              fontSize: 11,
+                              letterSpacing: 1.2,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Args: ${log['arguments_json'] ?? '{}'}',
+                        style: const TextStyle(color: AppConfig.textMuted, fontSize: 12),
+                      ),
+                      if ((log['result_summary'] ?? '').toString().isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          log['result_summary'].toString(),
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: AppConfig.textPrimary, fontSize: 12.5),
+                        ),
+                      ],
+                    ],
+                  ),
+                );
+              },
+            ),
+    );
+  }
+}
