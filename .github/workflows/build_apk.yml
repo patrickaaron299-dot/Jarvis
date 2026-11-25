@@ -34,7 +34,7 @@ jobs:
         working-directory: android_app
         run: |
           cp pubspec.yaml /tmp/jarvis_pubspec.yaml
-          cp android/app/src/main/AndroidManifest.xml /tmp/jarvis_AndroidManifest.xml
+          cp Android/App/Src/Main/AndroidManifest.xml /tmp/jarvis_AndroidManifest.xml
           cp -r lib /tmp/jarvis_lib
           flutter create . --platforms=android --org com.jarvis.assistant --project-name jarvis_android
           cp /tmp/jarvis_pubspec.yaml pubspec.yaml
